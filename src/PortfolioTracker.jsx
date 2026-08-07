@@ -1,213 +1,108 @@
-import { useState, useEffect, useMemo, useRef } from "react";
-import {
-  ComposedChart,
-  Line,
-  Area,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Legend,
-  ReferenceLine,
-} from "recharts";
+import React, { useState, useEffect, useMemo } from "react";
 import { parseCSV } from "./lib/parseCsv";
-import { getBenchmarkRefreshKey } from "./lib/benchmark";
+import { loadBenchmarksOncePerDay } from "./lib/benchmark";
+import { HeaderStats } from "./components/HeaderStats";
+import { ChartArea } from "./components/ChartArea";
+import { Ledger } from "./components/Ledger";
+import { MONTHS, fmt } from "./lib/formatters";
 
-// --- CONSTANTS & CONFIG ---
-const MONTHS = [
-  "Jan",
-  "Feb",
-  "Mar",
-  "Apr",
-  "May",
-  "Jun",
-  "Jul",
-  "Aug",
-  "Sep",
-  "Oct",
-  "Nov",
-  "Dec",
-];
+// --- GLOBAL STYLES ---
+const INLINE_STYLES = `
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
-const OVERLAY_COLORS = [
-  "#ef5350",
-  "#ec407a",
-  "#ab47bc",
-  "#7e57c2",
-  "#5c6bc0",
-  "#42a5f5",
-  "#29b6f6",
-  "#26c6da",
-  "#26a69a",
-  "#66bb6a",
-  "#9ccc65",
-  "#d4e157",
-];
+  /* ANIMATIONS */
+  @keyframes pulse-soft { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
+  @keyframes fadeSlideIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
 
-// --- UTILS ---
-const fmt = (n) =>
-  n.toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+  /* CLASSES */
+  .animate-in {
+    opacity: 0;
+    animation: fadeSlideIn 0.5s ease-out forwards;
+  }
+  
+  .glass-panel {
+    background: #111111;
+    border: 1px solid #333333;
+  }
 
-const formatDatePretty = (dateStr) => {
-  if (!dateStr || dateStr.includes("Start") || dateStr === "0") return dateStr;
-  const d = new Date(dateStr);
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-};
+  .glass-tooltip {
+    background: #111111;
+    border: 1px solid #333;
+    padding: 12px 16px;
+    min-width: 160px;
+    border-radius: 0;
+  }
+
+  .mono-num { font-family: 'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #b7b2ae; }
+  
+  .toggle-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    color: #b7b2ae;
+    padding: 6px 14px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  .toggle-btn:hover { color: #fff; background: rgba(255,255,255,0.06); }
+  .toggle-btn.active {
+    background: rgba(255,255,255,0.05);
+    color: #111;
+    background: #b7b2ae;
+  }
+
+  .nav-btn {
+      position: relative;
+      background: #161616;
+      border: 1px solid #333;
+      padding: 6px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #b7b2ae;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-family: 'JetBrains Mono', monospace;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+  }
+  .nav-btn:hover {
+      background: #1a1a1a;
+      color: #fff;
+  }
+  .nav-btn.active {
+      background: #b7b2ae;
+      color: #111;
+      border-color: #b7b2ae;
+  }
+
+  /* SCROLLBAR */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #333;  }
+  ::-webkit-scrollbar-thumb:hover { background: #555; }
+  body { 
+    margin: 0;
+    background: #161616;
+    color: #a0a0a0;
+    overflow: hidden;
+  }
+`;
 
 async function loadFromStorage() {
   const res = await fetch(
     "https://docs.google.com/spreadsheets/d/e/2PACX-1vR0RCmN9uf0TXrcan5bx33Yp-M_SP4KGF1mXBU_q_pc1YCjZMlFI30GjnPrP-fSJbKtY8vUZFRmqaZx/pub?gid=148955930&single=true&output=csv&t=" +
-      Date.now()
+    Date.now()
   );
   const text = await res.text();
   return parseCSV(text);
 }
-
-const BENCHMARK_CACHE_KEY = "marketstack_benchmark_cache_v1";
-let benchmarkRequestPromise = null;
-
-function isValidBenchmarkSeries(series) {
-  return (
-    Array.isArray(series) &&
-    series.every(
-      (row) =>
-        row &&
-        typeof row.date === "string" &&
-        Number.isFinite(Number(row.close)) &&
-        Number(row.close) > 0
-    )
-  );
-}
-
-async function loadBenchmarksOncePerDay() {
-  const refreshKey = getBenchmarkRefreshKey();
-
-  if (benchmarkRequestPromise) {
-    return benchmarkRequestPromise;
-  }
-
-  try {
-    const cachedRaw = window.localStorage.getItem(BENCHMARK_CACHE_KEY);
-    if (cachedRaw) {
-      const cached = JSON.parse(cachedRaw);
-      if (
-        cached?.refreshKey === refreshKey &&
-        isValidBenchmarkSeries(cached.sp500) &&
-        isValidBenchmarkSeries(cached.nasdaq)
-      ) {
-        return {
-          sp500: cached.sp500,
-          nasdaq: cached.nasdaq,
-        };
-      }
-    }
-  } catch {
-    // Ignore cache read errors and fetch fresh data.
-  }
-
-  benchmarkRequestPromise = (async () => {
-    const accessKey = process.env.REACT_APP_MARKETSTACK_KEY;
-    if (!accessKey) throw new Error("Missing REACT_APP_MARKETSTACK_KEY");
-    const dateFrom = new Date();
-    dateFrom.setUTCFullYear(dateFrom.getUTCFullYear() - 2);
-    const dateFromStr = dateFrom.toISOString().slice(0, 10);
-
-    const res = await fetch(
-      `https://api.marketstack.com/v1/eod?access_key=${accessKey}&symbols=SPY,QQQ&sort=ASC&date_from=${dateFromStr}&limit=1000`
-    );
-
-    if (!res.ok) throw new Error("Failed benchmark fetch");
-    const data = await res.json();
-    const rows = Array.isArray(data?.data) ? data.data : [];
-
-    const mapped = rows
-      .map((r) => {
-        const symbol = String(r?.symbol || "").toUpperCase();
-        const rawDate = String(r?.date || "").slice(0, 10);
-        const close = Number(r?.close);
-        if (!rawDate || !Number.isFinite(close) || close <= 0) return null;
-        return { symbol, date: rawDate, close };
-      })
-      .filter(Boolean)
-      .sort((a, b) => a.date.localeCompare(b.date));
-
-    const sp500 = mapped
-      .filter((r) => r.symbol.startsWith("SPY"))
-      .map(({ date, close }) => ({ date, close }));
-    const nasdaq = mapped
-      .filter((r) => r.symbol.startsWith("QQQ"))
-      .map(({ date, close }) => ({ date, close }));
-
-    const payload = { sp500, nasdaq };
-
-    try {
-      window.localStorage.setItem(
-        BENCHMARK_CACHE_KEY,
-        JSON.stringify({ refreshKey, ...payload, fetchedAt: new Date().toISOString() })
-      );
-    } catch {
-      // Ignore cache write errors.
-    }
-
-    return payload;
-  })();
-
-  try {
-    return await benchmarkRequestPromise;
-  } finally {
-    benchmarkRequestPromise = null;
-  }
-}
-
-// --- ANIMATED NUMBER COMPONENT ---
-const AnimatedNumber = ({ value, duration = 1200 }) => {
-  const [displayValue, setDisplayValue] = useState(value);
-  const prevValueRef = useRef(value);
-
-  useEffect(() => {
-    let animationFrame;
-    let start = prevValueRef.current;
-    const end = value;
-    if (start === end) {
-      prevValueRef.current = value;
-      return;
-    }
-
-    if (Math.abs(end - start) < 10) {
-      setDisplayValue(end);
-      prevValueRef.current = value;
-      return;
-    }
-
-    const startTime = performance.now();
-
-    const animate = (currentTime) => {
-      const elapsed = currentTime - startTime;
-      const progress = Math.min(elapsed / duration, 1);
-      const ease = progress === 1 ? 1 : 1 - Math.pow(2, -10 * progress);
-
-      const current = start + (end - start) * ease;
-      setDisplayValue(current);
-
-      if (progress < 1) {
-        animationFrame = requestAnimationFrame(animate);
-      }
-    };
-
-    animationFrame = requestAnimationFrame(animate);
-
-    prevValueRef.current = value;
-    return () => {
-      if (animationFrame) cancelAnimationFrame(animationFrame);
-    };
-  }, [value, duration]);
-
-  return fmt(displayValue);
-};
 
 export default function PortfolioTracker() {
   const [entries, setEntries] = useState([]);
@@ -437,7 +332,7 @@ export default function PortfolioTracker() {
       return {
         label:
           view === "overall" || view === "100x"
-            ? formatDatePretty(e.date)
+            ? e.date.slice(5) // Just showing month and day briefly on axis instead of prettyDate
             : e.date.slice(8),
         date: e.date,
         originalBalance: e.balance,
@@ -594,6 +489,27 @@ export default function PortfolioTracker() {
       }
     }
 
+    let weeklyPct = 0;
+    if (sortedEntries.length > 0) {
+      const lastEntry = sortedEntries[sortedEntries.length - 1];
+      const lastDate = new Date(lastEntry.date);
+      lastDate.setDate(lastDate.getDate() - 7);
+      const weekStr = lastDate.toISOString().split("T")[0];
+
+      let weekAgoEntry = null;
+      for (let i = sortedEntries.length - 1; i >= 0; i--) {
+        if (sortedEntries[i].date <= weekStr) {
+          weekAgoEntry = sortedEntries[i];
+          break;
+        }
+      }
+      if (!weekAgoEntry && sortedEntries.length > 0) weekAgoEntry = sortedEntries[0];
+
+      if (weekAgoEntry && weekAgoEntry.balance > 0) {
+        weeklyPct = ((lastEntry.balance - weekAgoEntry.balance) / weekAgoEntry.balance) * 100;
+      }
+    }
+
     // ORACLE PREDICTION
     let projectedDate = null;
     let avgDailyGrowth = 0;
@@ -632,6 +548,7 @@ export default function PortfolioTracker() {
       currentBalance: last?.balance ?? 0,
       projectedDate,
       avgDailyGrowth,
+      weeklyPct,
     };
   }, [sortedEntries, effectiveStart, view]);
 
@@ -663,282 +580,21 @@ export default function PortfolioTracker() {
   const activeHeaderMulti =
     effectiveStart > 0 ? activeHeaderBalance / effectiveStart : 0;
 
-  // --- BUTTON HOVER STATS ---
-  const allMonthFinals = useMemo(() => {
-    const stats = {};
-    monthsWithData.forEach((mIdx) => {
-      const mStr = MONTHS[mIdx];
-      const me = sortedEntries.filter(
-        (e) => new Date(e.date + "T00:00:00").getMonth() === mIdx
-      );
-      if (!me.length) return;
-
-      const lastEntry = me[me.length - 1];
-      const prevMonthEntries = sortedEntries.filter(
-        (e) => new Date(e.date + "T00:00:00").getMonth() === mIdx - 1
-      );
-      let base = 0;
-      if (prevMonthEntries.length > 0) {
-        base = prevMonthEntries[prevMonthEntries.length - 1].balance;
-      } else {
-        base = me[0].balance;
-      }
-
-      stats[mStr] = {
-        value: lastEntry.balance,
-        profit: lastEntry.balance - base,
-        percent: base > 0 ? ((lastEntry.balance - base) / base) * 100 : 0,
-      };
-    });
-    return stats;
-  }, [sortedEntries, monthsWithData]);
-
-  // Theme Logic
-  const isWinning = activeHeaderPnl >= 0;
-
-  const themeColors = isWinning
-    ? {
-        primary: "#10b981", // Emerald 500
-        secondary: "#3b82f6", // Blue 500
-        glow: "rgba(16, 185, 129, 0.4)",
-      }
-    : {
-        primary: "#ef4444", // Red 500
-        secondary: "#8b5cf6", // Violet 500
-        glow: "rgba(239, 68, 68, 0.4)",
-      };
+  const themeColors = {
+    primary: "#b7b2ae", // Requested white
+    secondary: "#929292", // Slightly dimmed white
+  };
 
   const semanticColors = {
-    positive: "#10b981",
-    negative: "#ef4444",
-  };
-
-  const CustomLegend = ({ payload }) => {
-    return (
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 8,
-          justifyContent: "center",
-          padding: "10px 0 0",
-          fontSize: 11,
-          fontFamily: "'JetBrains Mono', monospace",
-        }}
-      >
-        {payload.map((entry) => {
-          const isHidden = hiddenMonths.has(entry.value);
-          const isHighlighted = highlightedMonth === entry.value;
-          return (
-            <div
-              key={entry.value}
-              onClick={() => {
-                const newHidden = new Set(hiddenMonths);
-                if (isHidden) newHidden.delete(entry.value);
-                else newHidden.add(entry.value);
-                setHiddenMonths(newHidden);
-              }}
-              onMouseEnter={() => setHighlightedMonth(entry.value)}
-              onMouseLeave={() => setHighlightedMonth(null)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                cursor: "pointer",
-                opacity: isHidden ? 0.3 : 1,
-                padding: "4px 8px",
-                borderRadius: 4,
-                background: isHighlighted
-                  ? "rgba(255,255,255,0.08)"
-                  : "transparent",
-                transition: "all 0.2s",
-                border: isHighlighted
-                  ? `1px solid ${entry.color}`
-                  : "1px solid transparent",
-              }}
-            >
-              <div
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: "50%",
-                  background: entry.color,
-                  boxShadow: isHighlighted ? `0 0 8px ${entry.color}` : "none",
-                }}
-              />
-              <span
-                style={{
-                  color: isHighlighted ? "#fff" : "#888",
-                  fontWeight: isHighlighted ? 600 : 400,
-                  transition: "color 0.2s",
-                }}
-              >
-                {entry.value}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-    );
-  };
-
-  const CustomTooltip = ({ active, payload, label }) => {
-    if (!active || !payload?.length) return null;
-
-    if (view === "overlay") {
-      const validPayload = payload.filter(
-        (p) => p.value != null && !hiddenMonths.has(p.name)
-      );
-      if (!validPayload.length) return null;
-
-      return (
-        <div className="glass-tooltip">
-          <div
-            style={{
-              color: "#888",
-              fontSize: 11,
-              marginBottom: 8,
-              fontFamily: "'Inter', sans-serif",
-            }}
-          >
-            Day {label} Comparison
-          </div>
-          {validPayload
-            .sort((a, b) => b.value - a.value)
-            .map((p) => (
-              <div
-                key={p.name}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  fontSize: 12,
-                  marginBottom: 4,
-                  fontFamily: "'JetBrains Mono', monospace",
-                }}
-              >
-                <span style={{ color: p.color, marginRight: 12 }}>
-                  {p.name}:
-                </span>
-                <span style={{ color: "#e8e8e8", fontWeight: 600 }}>
-                  {metric === "percent" && "+"}
-                  {fmt(p.value)}
-                  {metric === "percent" ? "%" : metric === "profit" ? "$" : ""}
-                </span>
-              </div>
-            ))}
-        </div>
-      );
-    }
-
-    const d = payload[0]?.payload;
-    if (!d) return null;
-
-    if (d.isBaseline) {
-      return (
-        <div className="glass-tooltip">
-          <div
-            style={{
-              color: "#aaa",
-              fontSize: 11,
-              fontStyle: "italic",
-              marginBottom: 5,
-              fontFamily: "'Inter', sans-serif",
-            }}
-          >
-            Starting Point
-          </div>
-          <div
-            style={{
-              color: "#fff",
-              fontSize: 13,
-              fontFamily: "'JetBrains Mono', monospace",
-            }}
-          >
-            {privacyMode ? "$ ****" : `$${fmt(d.originalBalance)}`}
-          </div>
-        </div>
-      );
-    }
-
-    const is100xPercent = view === "100x" && metric === "percent";
-    let mainValueDisplay;
-    if (is100xPercent) {
-      mainValueDisplay = `${fmt(d.value)}% of Goal`;
-    } else if (metric === "percent") {
-      mainValueDisplay = `${d.value >= 0 ? "+" : ""}${fmt(d.value)}%`;
-    } else if (metric === "profit") {
-      mainValueDisplay = `${d.value >= 0 ? "+" : ""}$${fmt(d.value)}`;
-    } else {
-      mainValueDisplay = privacyMode ? "$ ****" : `$${fmt(d.value)}`;
-    }
-
-    return (
-      <div className="glass-tooltip">
-        <div
-          style={{
-            color: "#888",
-            fontSize: 11,
-            marginBottom: 6,
-            fontFamily: "'JetBrains Mono', monospace",
-            letterSpacing: "-0.5px",
-          }}
-        >
-          {formatDatePretty(d.date)}
-        </div>
-        <div
-          style={{
-            color: "#fff",
-            fontSize: 15,
-            fontWeight: 700,
-            marginBottom: 4,
-            fontFamily: "'JetBrains Mono', monospace",
-            textShadow: "0 2px 10px rgba(0,0,0,0.5)",
-          }}
-        >
-          {mainValueDisplay}
-        </div>
-        {metric !== "value" && (
-          <div
-            style={{
-              color: "rgba(255,255,255,0.5)",
-              fontSize: 11,
-              fontFamily: "'JetBrains Mono', monospace",
-            }}
-          >
-            Bal: {privacyMode ? "****" : `$${fmt(d.originalBalance)}`}
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  const getAxisTickFormatter = (val) => {
-    if (privacyMode && (metric === "value" || metric === "profit"))
-      return "****";
-    if (metric === "percent") return `${val.toFixed(0)}%`;
-    if (metric === "profit") {
-      return (
-        (val >= 0 ? "+" : "") +
-        (Math.abs(val) >= 1000 ? (val / 1000).toFixed(1) + "k" : val)
-      );
-    }
-    return val >= 1000 ? (val / 1000).toFixed(1) + "K" : val.toLocaleString();
-  };
-
-  const get100xDomain = () => {
-    if (view !== "100x") return ["auto", "auto"];
-    const target = effectiveStart * 100;
-    if (metric === "percent") return [0, 100];
-    if (metric === "profit") return [0, target - effectiveStart];
-    return [0, Math.max(target, stats.currentBalance * 1.1)];
+    positive: "#b7b2ae", // Brutalist monochrome override
+    negative: "#b7b2ae", // Brutalist monochrome override
   };
 
   // Check last data point for color logic
   const isPositiveValue =
     chartData.length > 0 &&
     chartData[chartData.length - 1].value >=
-      (metric === "value" ? chartData[0].value : 0);
-  const areaColor = isPositiveValue ? themeColors.primary : "#ef4444";
+    (metric === "value" ? chartData[0].value : 0);
 
   // Is a specific month selected?
   const isMonthView = !["overall", "100x", "overlay"].includes(view);
@@ -947,149 +603,17 @@ export default function PortfolioTracker() {
   return (
     <div
       style={{
-        background: "#050505",
-        minHeight: "100vh",
-        fontFamily: "'Inter', sans-serif",
-        color: "#e2e8f0",
+        background: "#111111",
+        height: "100vh",
+        fontFamily: "'JetBrains Mono', monospace",
+        color: "#a0a0a0",
         position: "relative",
         overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
       }}
     >
-      {/* GLOBAL STYLES & FONTS */}
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
-
-        /* ANIMATIONS */
-        @keyframes aurora-1 {
-          0% { transform: translate(0, 0) scale(1); opacity: 0.12; }
-          33% { transform: translate(30px, -50px) scale(1.1); opacity: 0.15; }
-          66% { transform: translate(-20px, 20px) scale(0.9); opacity: 0.12; }
-          100% { transform: translate(0, 0) scale(1); opacity: 0.12; }
-        }
-        @keyframes aurora-2 {
-          0% { transform: translate(0, 0) scale(1); opacity: 0.1; }
-          50% { transform: translate(-40px, 30px) scale(1.2); opacity: 0.15; }
-          100% { transform: translate(0, 0) scale(1); opacity: 0.1; }
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes pulse-soft { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
-
-        /* CLASSES */
-        .animate-in {
-          animation: fadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-          opacity: 0;
-        }
-        
-        .glass-panel {
-          background: rgba(20, 20, 24, 0.6);
-          backdrop-filter: blur(24px);
-          -webkit-backdrop-filter: blur(24px);
-          /* BORDER REMOVED AS REQUESTED */
-          border: none;
-          box-shadow: 0 20px 40px -10px rgba(0,0,0,0.5);
-        }
-
-        .glass-tooltip {
-          background: rgba(10, 10, 12, 0.9);
-          backdrop-filter: blur(16px);
-          border: 1px solid rgba(255, 255, 255, 0.1);
-          border-radius: 12px;
-          padding: 12px 16px;
-          box-shadow: 0 8px 32px rgba(0,0,0,0.6);
-          min-width: 160px;
-        }
-
-        .mono-num { font-family: 'JetBrains Mono', monospace; }
-        
-        .toggle-btn {
-          background: rgba(255,255,255,0.03);
-          border: none;
-          color: #64748b;
-          padding: 6px 14px;
-          font-size: 11px;
-          font-weight: 600;
-          cursor: pointer;
-          transition: all 0.2s ease;
-          font-family: 'Inter', sans-serif;
-          letter-spacing: 0.5px;
-        }
-        .toggle-btn:hover { color: #94a3b8; background: rgba(255,255,255,0.06); }
-        .toggle-btn.active {
-          background: rgba(255,255,255,0.1);
-          color: #f8fafc;
-        }
-
-        .nav-btn {
-            position: relative;
-            background: rgba(20, 20, 24, 0.4);
-            border: 1px solid rgba(255,255,255,0.05);
-            border-radius: 8px;
-            padding: 6px 12px;
-            font-size: 12px;
-            font-weight: 500;
-            color: #94a3b8;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        .nav-btn:hover {
-            background: rgba(255,255,255,0.08);
-            color: #fff;
-            border-color: rgba(255,255,255,0.1);
-        }
-        .nav-btn.active {
-            background: rgba(255,255,255,0.12);
-            color: #fff;
-            border-color: rgba(255,255,255,0.15);
-            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-        }
-
-        /* SCROLLBAR */
-        ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
-        ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
-        body { 
-          margin: 0;
-        }
-      `}</style>
-
-      {/* --- AURORA BACKGROUND --- */}
-      <div
-        style={{
-          position: "fixed",
-          inset: 0,
-          zIndex: 0,
-          pointerEvents: "none",
-        }}
-      >
-        <div
-          style={{
-            position: "absolute",
-            top: "-10%",
-            left: "10%",
-            width: "50vw",
-            height: "50vw",
-            background: `radial-gradient(circle, ${themeColors.primary} 0%, transparent 70%)`,
-            filter: "blur(120px)",
-            opacity: 0.12,
-            animation: "aurora-1 20s ease-in-out infinite alternate",
-          }}
-        />
-        <div
-          style={{
-            position: "absolute",
-            bottom: "10%",
-            right: "-10%",
-            width: "40vw",
-            height: "40vw",
-            background: `radial-gradient(circle, ${themeColors.secondary} 0%, transparent 70%)`,
-            filter: "blur(100px)",
-            opacity: 0.1,
-            animation: "aurora-2 15s ease-in-out infinite alternate",
-          }}
-        />
-      </div>
+      <style>{INLINE_STYLES}</style>
 
       {/* --- CONTENT CONTAINER --- */}
       <div
@@ -1098,274 +622,51 @@ export default function PortfolioTracker() {
           zIndex: 1,
           maxWidth: 1200,
           margin: "0 auto",
-          padding: "40px 20px",
+          padding: "24px 20px 24px 20px",
+          width: "100%",
+          display: "flex",
+          flexDirection: "column",
+          flex: 1,
+          overflow: "hidden",
+          opacity: loading ? 0 : 1,
+          transition: "opacity 0.3s ease",
+          gap: "24px",
         }}
       >
-        {/* HEADER AREA */}
-        <div
-          className="animate-in"
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "flex-end",
-            marginBottom: 30,
-          }}
-        >
-          <div>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                marginBottom: 4,
-              }}
-            >
-              <span
-                style={{
-                  fontSize: 10,
-                  fontWeight: 700,
-                  letterSpacing: "1px",
-                  textTransform: "uppercase",
-                  color: themeColors.primary,
-                  border: `1px solid ${themeColors.primary}`,
-                  padding: "2px 6px",
-                  borderRadius: 4,
-                }}
-              >
-                LIVE
-              </span>
-              <span style={{ fontSize: 13, color: "#94a3b8", fontWeight: 500 }}>
-                100x Challenge
-              </span>
-            </div>
-            <h1
-              className="mono-num"
-              style={{
-                fontSize: 48,
-                fontWeight: 600,
-                margin: 0,
-                letterSpacing: "-1.5px",
-                color: "#fff",
-                lineHeight: 1,
-              }}
-            >
-              {privacyMode ? (
-                "****"
-              ) : (
-                <>
-                  <span
-                    style={{
-                      fontSize: 28,
-                      verticalAlign: "top",
-                      marginRight: 4,
-                      opacity: 0.6,
-                    }}
-                  >
-                    $
-                  </span>
-                  <AnimatedNumber
-                    value={activeHeaderBalance}
-                    duration={scrubbedHeaderStats ? 180 : 1200}
-                  />
-                </>
-              )}
-            </h1>
-          </div>
-
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "flex-end",
-              gap: 12,
-            }}
-          >
-            {/* STATS ROW */}
-            <div style={{ display: "flex", gap: 24, alignItems: "flex-end" }}>
-              {isMonthView && (
-                <div
-                  style={{
-                    textAlign: "right",
-                    borderRight: "1px solid rgba(255,255,255,0.1)",
-                    paddingRight: 24,
-                  }}
-                >
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: "#64748b",
-                      fontWeight: 600,
-                      textTransform: "uppercase",
-                      letterSpacing: "0.5px",
-                    }}
-                  >
-                    {selectedMonthName}
-                  </div>
-                  <div
-                    className="mono-num"
-                    style={{
-                      fontSize: 16,
-                      fontWeight: 600,
-                      color:
-                        stats.monthPnl >= 0
-                          ? semanticColors.positive
-                          : semanticColors.negative,
-                    }}
-                  >
-                    {stats.monthPnl >= 0 ? "+" : ""}
-                    {privacyMode ? "****" : fmt(stats.monthPnl)}
-                    <span style={{ fontSize: 12, opacity: 0.8, marginLeft: 6 }}>
-                      ({stats.monthPct.toFixed(2)}%)
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              <div style={{ textAlign: "right" }}>
-                <div
-                  style={{
-                    fontSize: 11,
-                    color: "#64748b",
-                    fontWeight: 600,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.5px",
-                  }}
-                >
-                  Total P&L
-                </div>
-                <div
-                  className="mono-num"
-                  style={{
-                    fontSize: 16,
-                    fontWeight: 600,
-                    color: isWinning
-                      ? semanticColors.positive
-                      : semanticColors.negative,
-                  }}
-                >
-                  {activeHeaderPnl >= 0 ? "+" : ""}
-                  {privacyMode ? (
-                    "****"
-                  ) : (
-                    <AnimatedNumber
-                      value={Math.abs(activeHeaderPnl)}
-                      duration={scrubbedHeaderStats ? 180 : 1200}
-                    />
-                  )}
-                  <span style={{ fontSize: 12, opacity: 0.8, marginLeft: 6 }}>
-                    ({activeHeaderPct >= 0 ? "+" : ""}
-                    <AnimatedNumber
-                      value={Math.abs(activeHeaderPct)}
-                      duration={scrubbedHeaderStats ? 180 : 1200}
-                    />
-                    %)
-                  </span>
-                </div>
-              </div>
-
-              <div style={{ textAlign: "right" }}>
-                <div
-                  style={{
-                    fontSize: 11,
-                    color: "#64748b",
-                    fontWeight: 600,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.5px",
-                  }}
-                >
-                  Multiple
-                </div>
-                <div
-                  className="mono-num"
-                  style={{ fontSize: 16, fontWeight: 600, color: "#e2e8f0" }}
-                >
-                  <AnimatedNumber
-                    value={activeHeaderMulti}
-                    duration={scrubbedHeaderStats ? 180 : 1200}
-                  />
-                  x
-                </div>
-              </div>
-            </div>
-
-            {/* CONTROLS */}
-            <div
-              className="glass-panel"
-              style={{ display: "flex", padding: 4, borderRadius: 8, gap: 4 }}
-            >
-              <div
-                style={{ display: "flex", borderRadius: 4, overflow: "hidden" }}
-              >
-                <button
-                  className={`toggle-btn ${metric === "value" ? "active" : ""}`}
-                  onClick={() => setMetric("value")}
-                >
-                  Value
-                </button>
-                <button
-                  className={`toggle-btn ${
-                    metric === "profit" ? "active" : ""
-                  }`}
-                  onClick={() => setMetric("profit")}
-                >
-                  Profit
-                </button>
-                <button
-                  className={`toggle-btn ${
-                    metric === "percent" ? "active" : ""
-                  }`}
-                  onClick={() => setMetric("percent")}
-                >
-                  %
-                </button>
-              </div>
-              <div
-                style={{
-                  width: 1,
-                  background: "rgba(255,255,255,0.1)",
-                  margin: "2px 0",
-                }}
-              />
-              <button
-                onClick={() => setPrivacyMode(!privacyMode)}
-                style={{
-                  background: "transparent",
-                  border: "none",
-                  color: privacyMode ? themeColors.primary : "#64748b",
-                  cursor: "pointer",
-                  padding: "0 8px",
-                  fontSize: 14,
-                }}
-              >
-                {privacyMode ? "👁️‍🗨️" : "👁️"}
-              </button>
-              <button
-                onClick={fetchData}
-                disabled={loading}
-                style={{
-                  background: "transparent",
-                  border: "none",
-                  color: "#64748b",
-                  cursor: "pointer",
-                  padding: "0 8px",
-                  fontSize: 14,
-                }}
-              >
-                {loading ? "↻" : "⟳"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <HeaderStats
+          activeHeaderBalance={activeHeaderBalance}
+          scrubbedHeaderStats={scrubbedHeaderStats}
+          stats={stats}
+          activeHeaderPnl={activeHeaderPnl}
+          activeHeaderPct={activeHeaderPct}
+          activeHeaderMulti={activeHeaderMulti}
+          semanticColors={semanticColors}
+          themeColors={themeColors}
+          privacyMode={privacyMode}
+          setPrivacyMode={setPrivacyMode}
+          metric={metric}
+          setMetric={setMetric}
+          view={view}
+          setView={setView}
+          isMonthView={isMonthView}
+          selectedMonthName={selectedMonthName}
+          effectiveStart={effectiveStart}
+          loading={loading}
+          fetchData={fetchData}
+          MONTHS={MONTHS}
+          monthsWithData={monthsWithData}
+          fmt={fmt}
+        />
 
         {/* PROGRESS HUD */}
         {effectiveStart > 0 && stats.currentBalance > 0 && (
           <div
             className="glass-panel animate-in"
             style={{
-              marginBottom: 30,
               padding: "16px 20px",
-              borderRadius: 16,
-              animationDelay: "0.1s",
+              animationDelay: "0.2s",
+              border: "1px solid #333",
+              background: "#161616",
             }}
           >
             <div
@@ -1374,15 +675,17 @@ export default function PortfolioTracker() {
                 justifyContent: "space-between",
                 marginBottom: 8,
                 fontSize: 12,
+                textTransform: "uppercase",
+                letterSpacing: "1px",
               }}
             >
-              <span style={{ color: "#94a3b8" }}>
+              <span style={{ color: "#dcdcdc" }}>
                 Progress to Target (
                 {privacyMode ? "$****" : `$${fmt(effectiveStart * 100)}`})
               </span>
               <span
                 className="mono-num"
-                style={{ color: themeColors.secondary, fontWeight: 600 }}
+                style={{ color: themeColors.primary, fontWeight: 600 }}
               >
                 {((stats.overallMulti / 100) * 100).toFixed(3)}%
               </span>
@@ -1390,9 +693,8 @@ export default function PortfolioTracker() {
 
             <div
               style={{
-                height: 8,
-                background: "rgba(255,255,255,0.05)",
-                borderRadius: 4,
+                height: 4,
+                background: "#333",
                 overflow: "hidden",
                 position: "relative",
               }}
@@ -1401,9 +703,7 @@ export default function PortfolioTracker() {
                 style={{
                   height: "100%",
                   width: `${Math.min(100, (stats.overallMulti / 100) * 100)}%`,
-                  background: `linear-gradient(90deg, ${themeColors.primary}, ${themeColors.secondary})`,
-                  boxShadow: `0 0 10px ${themeColors.glow}`,
-                  borderRadius: 4,
+                  background: themeColors.primary,
                   transition: "width 1s cubic-bezier(0.4, 0, 0.2, 1)",
                 }}
               />
@@ -1414,10 +714,11 @@ export default function PortfolioTracker() {
                 style={{
                   marginTop: 8,
                   fontSize: 11,
-                  color: "#64748b",
+                  color: "#dcdcdc",
                   display: "flex",
                   alignItems: "center",
                   gap: 6,
+                  textTransform: "uppercase",
                 }}
               >
                 <span
@@ -1425,14 +726,11 @@ export default function PortfolioTracker() {
                     display: "inline-block",
                     width: 6,
                     height: 6,
-                    borderRadius: "50%",
-                    background: themeColors.secondary,
-                    animation: "pulse-soft 2s infinite",
+                    background: themeColors.primary,
                   }}
                 />
-                {/* TEXT REVERTED HERE */}
                 Target hit by{" "}
-                <span style={{ color: "#e2e8f0" }}>
+                <span style={{ color: "#fff" }}>
                   {stats.projectedDate}
                 </span>{" "}
                 based on current velocity.
@@ -1441,557 +739,35 @@ export default function PortfolioTracker() {
           </div>
         )}
 
-        {/* VIEW NAVIGATION WITH RELIABLE STATE-BASED HOVER */}
-        <div
-          className="animate-in"
-          style={{
-            marginBottom: 16,
-            animationDelay: "0.2s",
-            overflowX: "auto",
-            paddingBottom: 4,
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              gap: 8,
-              minWidth: "min-content",
-              alignItems: "center",
-            }}
-          >
-            <button
-              onClick={() => setView("overall")}
-              className={`nav-btn ${view === "overall" ? "active" : ""}`}
-            >
-              Overall
-            </button>
-            <button
-              onClick={() => setView("100x")}
-              className={`nav-btn ${view === "100x" ? "active" : ""}`}
-            >
-              100x Progress
-            </button>
-            <button
-              onClick={() => setView("overlay")}
-              className={`nav-btn ${view === "overlay" ? "active" : ""}`}
-            >
-              Month Overlay
-            </button>
+        <ChartArea
+          chartDataWithBenchmarks={chartDataWithBenchmarks}
+          chartData={chartData}
+          view={view}
+          loading={loading}
+          themeColors={themeColors}
+          metric={metric}
+          setMetric={setMetric}
+          privacyMode={privacyMode}
+          setScrubbedPoint={setScrubbedPoint}
+          hiddenMonths={hiddenMonths}
+          setHiddenMonths={setHiddenMonths}
+          highlightedMonth={highlightedMonth}
+          setHighlightedMonth={setHighlightedMonth}
+          monthsWithData={monthsWithData}
+          showSp500={showSp500}
+          setShowSp500={setShowSp500}
+          showNasdaq={showNasdaq}
+          setShowNasdaq={setShowNasdaq}
+          isPositiveValue={isPositiveValue}
+          stats={stats}
+          effectiveStart={effectiveStart}
+        />
 
-            <div
-              style={{
-                width: 1,
-                height: 24,
-                background: "rgba(255,255,255,0.1)",
-                margin: "0 8px",
-              }}
-            />
-
-            {MONTHS.map((m, i) => {
-              const has = monthsWithData.has(i);
-              const active = view === String(i);
-              const stats = allMonthFinals[m];
-
-              return (
-                <div key={m} style={{ position: "relative" }}>
-                  <button
-                    onClick={() => has && setView(String(i))}
-                    onMouseEnter={() =>
-                      has &&
-                      setHoveredMonthStats(stats ? { name: m, ...stats } : null)
-                    }
-                    onMouseLeave={() => setHoveredMonthStats(null)}
-                    disabled={!has}
-                    className={`nav-btn ${active ? "active" : ""}`}
-                    style={{
-                      opacity: has ? 1 : 0.3,
-                      cursor: has ? "pointer" : "default",
-                    }}
-                  >
-                    {m}
-                    {has && (
-                      <div
-                        style={{
-                          position: "absolute",
-                          bottom: -4,
-                          left: "50%",
-                          transform: "translateX(-50%)",
-                          width: 4,
-                          height: 4,
-                          borderRadius: "50%",
-                          background: themeColors.primary,
-                          opacity: 0.6,
-                        }}
-                      />
-                    )}
-                  </button>
-
-                  {/* STATE-BASED TOOLTIP FOR RELIABILITY */}
-                  {hoveredMonthStats && hoveredMonthStats.name === m && (
-                    <div
-                      style={{
-                        position: "absolute",
-                        bottom: "135%",
-                        left: "50%",
-                        transform: "translateX(-50%)",
-                        background: "rgba(10, 10, 14, 0.95)",
-                        border: "1px solid rgba(255,255,255,0.15)",
-                        padding: "8px 12px",
-                        borderRadius: 6,
-                        whiteSpace: "nowrap",
-                        zIndex: 100,
-                        pointerEvents: "none",
-                        boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
-                      }}
-                    >
-                      <div
-                        style={{
-                          color: "#94a3b8",
-                          fontSize: 10,
-                          fontWeight: 600,
-                          marginBottom: 2,
-                          fontFamily: "'Inter', sans-serif",
-                        }}
-                      >
-                        {m} Summary
-                      </div>
-                      <div
-                        style={{
-                          display: "flex",
-                          gap: 8,
-                          fontFamily: "'JetBrains Mono', monospace",
-                          fontSize: 11,
-                        }}
-                      >
-                        <span
-                          style={{
-                            color:
-                              hoveredMonthStats.profit >= 0
-                                ? semanticColors.positive
-                                : semanticColors.negative,
-                            fontWeight: 600,
-                          }}
-                        >
-                          {hoveredMonthStats.profit >= 0 ? "+" : ""}$
-                          {fmt(hoveredMonthStats.profit)}
-                        </span>
-                        <span
-                          style={{
-                            color:
-                              hoveredMonthStats.percent >= 0
-                                ? semanticColors.positive
-                                : semanticColors.negative,
-                          }}
-                        >
-                          ({hoveredMonthStats.percent >= 0 ? "+" : ""}
-                          {hoveredMonthStats.percent.toFixed(1)}%)
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {view !== "overlay" && (
-          <div
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: 8,
-              justifyContent: "center",
-              marginBottom: 12,
-              fontSize: 11,
-              fontFamily: "'JetBrains Mono', monospace",
-            }}
-          >
-            {[
-              { key: "sp500", label: "S&P", color: "#f59e0b", enabled: showSp500 },
-              {
-                key: "nasdaq",
-                label: "Nasdaq",
-                color: "#22d3ee",
-                enabled: showNasdaq,
-              },
-            ].map((benchmark) => (
-              <div
-                key={benchmark.key}
-                onClick={() =>
-                  benchmark.key === "sp500"
-                    ? setShowSp500((prev) => !prev)
-                    : setShowNasdaq((prev) => !prev)
-                }
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  cursor: "pointer",
-                  opacity: benchmark.enabled ? 1 : 0.3,
-                  padding: "4px 8px",
-                  borderRadius: 4,
-                  transition: "all 0.2s",
-                  border: benchmark.enabled
-                    ? `1px solid ${benchmark.color}`
-                    : "1px solid transparent",
-                }}
-              >
-                <div
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: "50%",
-                    background: benchmark.color,
-                    boxShadow: benchmark.enabled
-                      ? `0 0 8px ${benchmark.color}`
-                      : "none",
-                  }}
-                />
-                <span
-                  style={{
-                    color: benchmark.enabled ? "#fff" : "#888",
-                    fontWeight: benchmark.enabled ? 600 : 400,
-                    transition: "color 0.2s",
-                  }}
-                >
-                  {benchmark.label}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* CHART CONTAINER */}
-        <div
-          className="glass-panel animate-in"
-          style={{
-            padding: "20px 20px 10px 0",
-            borderRadius: 16,
-            minHeight: 420,
-            animationDelay: "0.3s",
-          }}
-        >
-          {loading ? (
-            <div
-              style={{
-                height: 380,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexDirection: "column",
-                gap: 16,
-              }}
-            >
-              <div
-                style={{
-                  width: 50,
-                  height: 50,
-                  borderRadius: "50%",
-                  border: "2px solid rgba(255,255,255,0.1)",
-                  borderTopColor: themeColors.primary,
-                  animation: "spin 1s linear infinite",
-                }}
-              />
-            </div>
-          ) : (
-            <ResponsiveContainer width="100%" height={380}>
-              <ComposedChart
-                data={chartDataWithBenchmarks}
-                margin={{ top: 10, right: 20, left: 10, bottom: 0 }}
-                onMouseMove={(state) => {
-                  if (view === "overlay") return;
-                  const activeIndex = state?.activeTooltipIndex;
-                  if (activeIndex == null) {
-                    setScrubbedPoint(null);
-                    return;
-                  }
-
-                  const point = chartData[activeIndex];
-                  if (!point || point.isBaseline) {
-                    setScrubbedPoint(null);
-                    return;
-                  }
-
-                  setScrubbedPoint(point);
-                }}
-                onMouseLeave={() => setScrubbedPoint(null)}
-              >
-                <defs>
-                  <linearGradient id="gArea" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor={areaColor} stopOpacity={0.4} />
-                    <stop
-                      offset="100%"
-                      stopColor={areaColor}
-                      stopOpacity={0.0}
-                    />
-                  </linearGradient>
-                  {/* SOFTENED GLOW FILTER */}
-                  <filter
-                    id="glow"
-                    x="-50%"
-                    y="-50%"
-                    width="200%"
-                    height="200%"
-                  >
-                    <feGaussianBlur
-                      in="SourceGraphic"
-                      stdDeviation="12"
-                      result="blur"
-                    />
-                    <feComponentTransfer in="blur" result="softBlur">
-                      <feFuncA type="linear" slope="0.5" />
-                    </feComponentTransfer>
-                    <feMerge>
-                      <feMergeNode in="softBlur" />
-                      <feMergeNode in="SourceGraphic" />
-                    </feMerge>
-                  </filter>
-                </defs>
-                <CartesianGrid
-                  strokeDasharray="3 3"
-                  stroke="rgba(255,255,255,0.04)"
-                  vertical={false}
-                />
-                <XAxis
-                  dataKey="label"
-                  tick={{
-                    fill: "#64748b",
-                    fontSize: 11,
-                    fontFamily: "'JetBrains Mono', monospace",
-                  }}
-                  axisLine={false}
-                  tickLine={false}
-                  dy={10}
-                  interval={view === "overlay" ? 2 : "preserveStartEnd"}
-                />
-                <YAxis
-                  domain={get100xDomain()}
-                  tickFormatter={getAxisTickFormatter}
-                  tick={{
-                    fill: "#64748b",
-                    fontSize: 11,
-                    fontFamily: "'JetBrains Mono', monospace",
-                  }}
-                  axisLine={false}
-                  tickLine={false}
-                  dx={-10}
-                />
-                <Tooltip
-                  content={<CustomTooltip />}
-                  cursor={{
-                    stroke: "rgba(255,255,255,0.1)",
-                    strokeWidth: 1,
-                    strokeDasharray: "4 4",
-                  }}
-                />
-
-                {metric !== "value" && view !== "100x" && (
-                  <ReferenceLine y={0} stroke="rgba(255,255,255,0.1)" />
-                )}
-
-                {view === "overlay" ? (
-                  <>
-                    {MONTHS.map((m, i) => {
-                      if (!monthsWithData.has(i)) return null;
-                      const isHidden = hiddenMonths.has(m);
-                      const isHighlighted = highlightedMonth === m;
-                      const opacity = highlightedMonth
-                        ? isHighlighted
-                          ? 1
-                          : 0.1
-                        : isHidden
-                        ? 0
-                        : 0.8;
-
-                      return (
-                        <Line
-                          key={m}
-                          type="monotone"
-                          dataKey={m}
-                          stroke={OVERLAY_COLORS[i % OVERLAY_COLORS.length]}
-                          strokeWidth={isHighlighted ? 3 : 1.5}
-                          strokeOpacity={opacity}
-                          dot={false}
-                          activeDot={{ r: 6, strokeWidth: 0 }}
-                          connectNulls
-                          animationDuration={1000}
-                          filter="url(#glow)"
-                        />
-                      );
-                    })}
-                    <Legend content={<CustomLegend />} />
-                  </>
-                ) : (
-                  <>
-                    <Area
-                      type="monotone"
-                      dataKey="value"
-                      stroke={areaColor}
-                      strokeWidth={3}
-                      fill="url(#gArea)"
-                      animationDuration={1500}
-                      filter="url(#glow)"
-                      dot={(props) => {
-                        const isLast = props.index === chartDataWithBenchmarks.length - 1;
-                        if (!isLast)
-                          return <circle cx={props.cx} cy={props.cy} r={0} />;
-                        return (
-                          <g>
-                            <circle
-                              cx={props.cx}
-                              cy={props.cy}
-                              r={10}
-                              fill={areaColor}
-                              opacity={0.2}
-                              style={{ animation: "pulse-soft 2s infinite" }}
-                            />
-                            <circle
-                              cx={props.cx}
-                              cy={props.cy}
-                              r={4}
-                              fill="#fff"
-                            />
-                          </g>
-                        );
-                      }}
-                    />
-                    {(showSp500 || showNasdaq) && (
-                      <>
-                        {showSp500 && (
-                          <Line
-                            type="monotone"
-                            dataKey="sp500Compare"
-                            stroke="#f59e0b"
-                            strokeWidth={2}
-                            strokeDasharray="5 4"
-                            dot={false}
-                            connectNulls
-                            animationDuration={1200}
-                          />
-                        )}
-                        {showNasdaq && (
-                          <Line
-                            type="monotone"
-                            dataKey="nasdaqCompare"
-                            stroke="#22d3ee"
-                            strokeWidth={2}
-                            strokeDasharray="2 4"
-                            dot={false}
-                            connectNulls
-                            animationDuration={1200}
-                          />
-                        )}
-                      </>
-                    )}
-                  </>
-                )}
-              </ComposedChart>
-            </ResponsiveContainer>
-          )}
-        </div>
-
-        {/* RECENT ACTIVITY LIST */}
-        {sortedEntries.length > 0 && (
-          <div
-            className="animate-in"
-            style={{ marginTop: 30, animationDelay: "0.4s" }}
-          >
-            <div
-              style={{
-                fontSize: 12,
-                color: "#94a3b8",
-                marginBottom: 12,
-                fontWeight: 600,
-                textTransform: "uppercase",
-                letterSpacing: "1px",
-              }}
-            >
-              Recent Ledger
-            </div>
-            <div
-              className="glass-panel"
-              style={{
-                maxHeight: 250,
-                overflowY: "auto",
-                borderRadius: 12,
-                padding: "0 4px",
-              }}
-            >
-              {[...sortedEntries]
-                .reverse()
-                .slice(0, 20)
-                .map((e, i) => {
-                  const idx = sortedEntries.findIndex((x) => x.date === e.date);
-                  const prev = idx > 0 ? sortedEntries[idx - 1] : null;
-                  const change = prev ? e.balance - prev.balance : 0;
-                  const isPos = change >= 0;
-
-                  return (
-                    <div
-                      key={e.date}
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        padding: "12px 16px",
-                        borderBottom: "1px solid rgba(255,255,255,0.03)",
-                        transition: "background 0.2s",
-                      }}
-                      onMouseEnter={(ev) =>
-                        (ev.currentTarget.style.background =
-                          "rgba(255,255,255,0.03)")
-                      }
-                      onMouseLeave={(ev) =>
-                        (ev.currentTarget.style.background = "transparent")
-                      }
-                    >
-                      <span
-                        className="mono-num"
-                        style={{ color: "#94a3b8", fontSize: 12 }}
-                      >
-                        {formatDatePretty(e.date)}
-                      </span>
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 16,
-                        }}
-                      >
-                        {prev && (
-                          <span
-                            className="mono-num"
-                            style={{
-                              fontSize: 12,
-                              color: isPos
-                                ? semanticColors.positive
-                                : semanticColors.negative,
-                            }}
-                          >
-                            {isPos ? "+" : ""}
-                            {privacyMode ? "$****" : `$${fmt(change)}`}
-                          </span>
-                        )}
-                        <span
-                          className="mono-num"
-                          style={{
-                            fontSize: 13,
-                            fontWeight: 600,
-                            color: "#e2e8f0",
-                            minWidth: 80,
-                            textAlign: "right",
-                          }}
-                        >
-                          {privacyMode ? "$****" : `$${fmt(e.balance)}`}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-            </div>
-          </div>
-        )}
+        <Ledger
+          sortedEntries={sortedEntries}
+          privacyMode={privacyMode}
+          semanticColors={semanticColors}
+        />
       </div>
     </div>
   );
